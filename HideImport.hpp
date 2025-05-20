@@ -5,8 +5,11 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
-#include <type_traits>
-#include <stdexcept>
+#include <cstring>
+
+#ifndef ELF_ST_TYPE
+#define ELF_ST_TYPE ELF64_ST_TYPE
+#endif
 
 namespace HideImport {
     static std::unordered_map<std::string, void*> gHandleCache;
