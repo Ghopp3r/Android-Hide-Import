@@ -2,11 +2,21 @@
 
 #include "xdl/include/xdl.h"
 #include <elf.h>
+#include <link.h>
+#include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <type_traits>
 #include <stdexcept>
+
+#ifndef ELF_ST_TYPE
+# if __ELF_NATIVE_CLASS == 32
+#  define ELF_ST_TYPE ELF32_ST_TYPE
+# else
+#  define ELF_ST_TYPE ELF64_ST_TYPE
+# endif
+#endif
 
 namespace HideImport {
     static std::unordered_map<std::string, void*> gHandleCache;
@@ -43,29 +53,63 @@ namespace HideImport {
             if (xdl_info(handle, XDL_DI_DLINFO, &info) == 0) {
                 const ElfW(Phdr) *ph = info.dlpi_phdr;
                 for(size_t i = 0; i < info.dlpi_phnum; ++i, ++ph) {
-                    if (ph->p_type != PT_DYNAMIC) 
+                    if (ph->p_type != PT_DYNAMIC)
                         continue;
-                    
+
                     auto dyn = reinterpret_cast<ElfW(Dyn)*>(reinterpret_cast<uintptr_t>(info.dli_fbase) + ph->p_vaddr);
                     ElfW(Sym) *dynSym = nullptr;
                     const char *strTab = nullptr;
-                    size_t nSym = 0;
-    
+                    const uint32_t *sysvHash = nullptr;
+                    const uint32_t *gnuHash = nullptr;
+                    size_t symEnt = sizeof(ElfW(Sym));
+
                     for (; dyn->d_tag != DT_NULL; ++dyn) {
                         if (dyn->d_tag == DT_SYMTAB)
                            dynSym = reinterpret_cast<ElfW(Sym)*>(reinterpret_cast<uintptr_t>(info.dli_fbase) + dyn->d_un.d_ptr);
                         else if (dyn->d_tag == DT_STRTAB)
                             strTab = reinterpret_cast<const char*>(reinterpret_cast<uintptr_t>(info.dli_fbase) + dyn->d_un.d_ptr);
                         else if (dyn->d_tag == DT_SYMENT)
-                            nSym = dyn->d_un.d_val;
+                            symEnt = dyn->d_un.d_val;
+                        else if (dyn->d_tag == DT_HASH)
+                            sysvHash = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(info.dli_fbase) + dyn->d_un.d_ptr);
+                        else if (dyn->d_tag == DT_GNU_HASH)
+                            gnuHash = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(info.dli_fbase) + dyn->d_un.d_ptr);
                     }
                     if (!dynSym || !strTab) break;
-                    
-                    for (size_t idx = 0; ; ++idx) {
+
+                    size_t symbol_count = 0;
+                    if (sysvHash) {
+                        symbol_count = sysvHash[1];
+                    } else if (gnuHash) {
+                        uint32_t nbuckets = gnuHash[0];
+                        uint32_t symoffset = gnuHash[1];
+                        uint32_t bloom_cnt = gnuHash[2];
+                        const uint32_t* buckets = gnuHash + 4 + bloom_cnt;
+                        const uint32_t* chains = buckets + nbuckets;
+                        uint32_t max_sym = 0;
+                        for (uint32_t b = 0; b < nbuckets; ++b)
+                            if (buckets[b] > max_sym)
+                                max_sym = buckets[b];
+                        if (max_sym < symoffset)
+                            symbol_count = symoffset;
+                        else {
+                            for (uint32_t j = max_sym; ; ++j) {
+                                if (chains[j - symoffset] & 1u) {
+                                    symbol_count = j + 1u;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback: stop when st_name becomes zero repeatedly
+                        while (dynSym[symbol_count].st_name != 0)
+                            ++symbol_count;
+                    }
+
+                    for (size_t idx = 0; idx < symbol_count; ++idx) {
                         const char *name = strTab + dynSym[idx].st_name;
                         if (strcmp(name, sym.c_str()) == 0) {
                             if (ELF_ST_TYPE(dynSym[idx].st_info) == STT_GNU_IFUNC) {
-                                // IFUNC
                                 auto selector = (uintptr_t(*)())addr;
                                 addr = (void*)selector();
                             }
@@ -75,6 +119,9 @@ namespace HideImport {
                 }
             }
         }
+
+        if (!addr)
+            throw std::runtime_error("symbol not found: " + key);
     
     resolved:
         uintptr_t res = reinterpret_cast<uintptr_t>(addr);
