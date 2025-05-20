@@ -40,3 +40,6 @@ add_executable(sample
 
 target_link_libraries(sample PRIVATE xdl dl)
 ```
+
+## IDA PRO 9.0 output example:
+![image](https://github.com/user-attachments/assets/e604253a-8a40-40ba-99e7-1448e165ae2c)
