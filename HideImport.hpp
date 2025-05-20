@@ -2,6 +2,8 @@
 
 #include "xdl/include/xdl.h"
 #include <elf.h>
+#include <cstring>
+#include <link.h>
 #include <mutex>
 #include <string>
 #include <unordered_map>
